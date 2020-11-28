@@ -36,3 +36,41 @@ Flink does not implement all this functionality by itself. Instead, it focuses o
 ![](resources/spaf_0301.png)
 Figure 3-1. Application submission and component interactions
 
+### Data Transfer in Flink
+*  The TaskManagers take care of shipping data from sending tasks to receiving tasks.
+*  The network component of a TaskManager collects records in buffers before they are shipped, i.e., records are not shipped one by one but batched into buffers
+* Each TaskManager has a pool of network buffers (by default 32 KB in size) to send and receive data.
+* Streaming applications need to exchange data in a pipelined fashion—each pair of TaskManagers maintains a permanent TCP connection to exchange data
+
+![](resources/spaf_0304.png)
+Figure 3-4. Data transfer between TaskManagers
+
+* As shown in Figure 3-4, each of the four sender tasks needs at least four network buffers to send data to each of the receiver tasks and each receiver task requires at least four buffers to receive data.
+* Flink features different techniques to reduce the communication costs between tasks.
+
+### Credit-Based Flow Control
+* Buffering is needed to fully utilize the bandwidth of network connections. 
+* In the context of stream processing, one disadvantage of buffering is that it adds latency because records are collected in a buffer instead of being immediately shipped.
+* A receiving task grants some credit to a sending task, the number of network buffers that are reserved to receive its data. 
+* Once a sender receives a credit notification, it ships as many buffers as it was granted and the size of its backlog—the number of network buffers that are filled and ready to be shipped. 
+* The receiver processes the shipped data with the reserved buffers and uses the sender’s backlog size to prioritize the next credit grants for all its connected senders.
+
+**Advantages**
+ * reduces latency because senders can ship data as soon as the receiver has enough resources to accept it 
+ * effective mechanism to distribute network resources in the case of skewed data distributions because credit is granted based on the size of the senders’ backlog.
+
+### Task Chaining
+![](resources/spaf_0305.png)
+Figure 3-5. An operator pipeline that complies with the requirements of task chaining
+
+* two or more operators must be configured with the same parallelism * connected by local forward channels.
+
+![](resources/spaf_0306.png)
+Figure 3-6. Chained task execution with fused functions in a single thread and data passing via method calls
+
+* The functions of the operators are fused into a single task that is executed by a single thread. 
+* Records that are produced by a function are separately handed over to the next function with a simple method call. 
+* Hence, there are basically no serialization and communication costs for passing records between functions.
+* Task chaining can significantly reduce the communication costs between local tasks, but there are also cases when it makes sense to execute a pipeline without chaining. For example, it can make sense to break a long pipeline of chained tasks or break a chain into two tasks to schedule an expensive function to different slots.
+
+### Event-Time Processing
