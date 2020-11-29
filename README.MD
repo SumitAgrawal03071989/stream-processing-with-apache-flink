@@ -97,3 +97,74 @@ When a task receives a record that violates the watermark property and has small
 An interesting property of watermarks is that they allow an application to control result completeness and latency. Watermarks that are very tight—close to the record timestamps—result in low processing latency because a task will only briefly wait for more records to arrive before finalizing a computation. At the same time, the result completeness might suffer because relevant records might not be included in the result and would be considered as late records. Inversely, very conservative watermarks increase processing latency but improve result completeness.
 
 **Watermark Propagation and Event Time**
+
+Tasks can register timers at the timer service to perform a computation at a specific point in time in the future. For example, a window operator registers a timer for every active window, which cleans up the window’s state when the event time passes the window’s ending time
+
+When a task receives a watermark, the following actions take place:
+
+1. The task updates its internal event-time clock based on the watermark’s timestamp.
+2. The task’s time service identifies all timers with a time smaller than the updated event time. For each expired timer, the task invokes a callback function that can perform a computation and emit records.
+3. The task emits a watermark with the updated event time.
+
+A task maintains a partition watermark for each input partition. When it receives a watermark from a partition, it updates the respective partition watermark to be the maximum of the received value and the current value. Subsequently, the task updates its event-time clock to be the minimum of all partition watermarks. If the event-time clock advances, the task processes all triggered timers and finally broadcasts its new event time to all downstream tasks by emitting a corresponding watermark to all connected output partitions.
+
+![](resources/spaf_0309.png)
+
+Flink’s watermark-handling and propagation algorithm ensures operator tasks emit properly aligned timestamped records and watermarks. However, it relies on the fact that all partitions continuously provide increasing watermarks. As soon as one partition does not advance its watermarks or becomes completely idle and does not ship any records or watermarks, the event-time clock of a task will not advance and the timers of the task will not trigger
+
+## State Management
+![](resources/spaf_0310.png)
+
+In Flink, state is always associated with a specific operator. In order to make Flink’s runtime aware of the state of an operator, the operator needs to register its state. There are two types of state, operator state and keyed state, that are accessible from different scopes.
+
+
+**Operator State**
+
+Operator state is scoped to an operator task. This means that all records processed by the same parallel task have access to the same state. Operator state cannot be accessed by another task of the same or a different operator. Figure 3-11 shows how tasks access operator state.
+
+![](resources/spaf_0311.png)
+
+1. List state
+    
+    Represents state as a list of entries.
+
+2. Union list state
+    
+    Represents state as a list of entries as well. But it differs from regular list state in how it is restored in the case of a failure or when an application is started from a savepoint.
+
+3. Broadcast state.
+
+    Designed for the special case where the state of each task of an operator is identical. This property can be leveraged during checkpoints and when rescaling an operator. Both aspects are discussed in later sections of this chapter.
+
+
+    
+**Keyed State**
+
+Keyed state is maintained and accessed with respect to a key defined in the records of an operator’s input stream.
+
+![](resources/spaf_0311.png)
+
+You can think of keyed state as a key-value map that is partitioned (or sharded) on the key across all parallel tasks of an operator.
+
+* Value state
+
+    Stores a single value of arbitrary type per key. Complex data structures can also be stored as value state.
+
+* List state
+
+    Stores a list of values per key. The list entries can be of arbitrary type.
+
+* Map state
+
+    Stores a key-value map per key. The key and value of the map can be of arbitrary type.
+
+## State Backends
+
+A task of a stateful operator typically reads and updates its state for each incoming record. Because efficient state access is crucial to processing records with low latency, each parallel task locally maintains its state to ensure fast state accesses. How exactly the state is stored, accessed, and maintained is determined by a pluggable component that is called a state backend. A state backend is responsible for two things: local state management and checkpointing state to a remote location.
+
+For local state management, a state backend stores all keyed states and ensures that all accesses are correctly scoped to the current key. Flink provides state backends that manage keyed state as objects stored in in-memory data structures on the JVM heap. Another state backend serializes state objects and puts them into RocksDB, which writes them to local hard disks. While the first option gives very fast state access, it is limited by the size of the memory. Accessing state stored by the RocksDB state backend is slower but its state may grow very large.
+
+A state backend takes care of checkpointing the state of a task to a remote and persistent storage. The remote storage for checkpointing could be a distributed filesystem or a database system. State backends differ in how state is checkpointed. For instance, the RocksDB state backend supports incremental checkpoints, which can significantly reduce the checkpointing overhead for very large state sizes.
+
+## Scaling Stateful Operators
+
